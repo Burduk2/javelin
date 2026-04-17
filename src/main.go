@@ -92,7 +92,10 @@ func getStore() *Store {
 	data, err := os.ReadFile(storePath)
 	store := &Store{}
 	if err != nil {
-		cliMsg(true, corruptedStoreErrorMsg)
+		if os.IsNotExist(err) {
+			return &Store{Version: version, Anchors: []Anchor{}}
+		}
+		cliMsg(true, corruptedStoreErrorMsg+"\n"+err.Error())
 		os.Exit(1)
 	}
 
