@@ -2,177 +2,145 @@ package main
 
 import (
 	"bufio"
-	"encoding/json"
+	"bytes"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 )
 
-const version = "0.0.9"
+const version = "0.0.16"
 const LIMIT = 32
 
 var binPath = os.Getenv("EXE_ROOT")
-var storePath = binPath + "/store.json"
+var storePath = binPath + "/store"
 
-const (
-	ansiReset  = "\x1b[0m"
-	ansiBold   = "\x1b[1m"
-	ansiItalic = "\x1b[3m"
-	ansiGreen  = "\x1b[32m"
-	ansiRed    = "\x1b[31m"
-	ansiYellow = "\x1b[33m"
-	ansiGray   = "\x1b[90m"
-)
-
-func style(text string, codes ...string) string {
-	return strings.Join(codes, "") + text + ansiReset
-}
-
-const corruptedStoreErrorMsg = `anchor store is corrupted
-  -> "j -R" to reset it
-  -> "j -h" for more info`
-
-func cliMsg(isErr bool, msg string, args ...any) {
-	color := ansiGreen
-	if isErr {
-		color = ansiRed
-	}
-	fmt.Fprintln(os.Stderr, style("j:", ansiBold, color), fmt.Sprintf(msg, args...))
-}
-
-func printUsage() {
-	cmds := []struct {
-		cmd  string
-		desc string
-	}{
-		{"<name>", "jump to anchor <name>"},
-		{"-a <name>", "anchor the current directory as <name>"},
-		{"-r <name>", "remove anchor <name>"},
-		{"-l", "list anchors"},
-		{"-h", "show help"},
-		{"-R", "reset the anchor store"},
-	}
-	topCmdLen := 0
-	for _, cmd := range cmds {
-		if len(cmd.cmd) > topCmdLen {
-			topCmdLen = len(cmd.cmd)
-		}
-	}
-	fmt.Fprintf(
-		os.Stderr,
-		"%s %s\n\n%s\n",
-		style("Javelin", ansiBold),
-		style(fmt.Sprintf("[v%s]", version), ansiGray),
-		"usage:",
-	)
-	for _, cmd := range cmds {
-		pad := topCmdLen - len(cmd.cmd) + 4
-		fmt.Fprintf(
-			os.Stderr,
-			"  %s %s%s%s\n",
-			style("j", ansiBold),
-			style(cmd.cmd, ansiYellow),
-			strings.Repeat(" ", pad),
-			style(cmd.desc, ansiGray),
-		)
-	}
-}
-
-type Store struct {
-	Version string   `json:"version"`
-	Anchors []Anchor `json:"anchors"`
-}
+type Store []Anchor
 type Anchor struct {
-	Name string `json:"name"`
-	Path string `json:"path"`
+	name string
+	path string
 }
 
+// json perf = 130 || my perf = 67
 func getStore() *Store {
-	data, err := os.ReadFile(storePath)
-	store := &Store{}
+	rawData, err := os.ReadFile(storePath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return &Store{Version: version, Anchors: []Anchor{}}
+			return &Store{}
 		}
 		cliMsg(true, corruptedStoreErrorMsg+"\n"+err.Error())
-		os.Exit(1)
+	}
+	data := string(rawData)
+	if data == "" {
+		return &Store{}
 	}
 
-	err = json.Unmarshal(data, &store)
+	store := Store{}
+	for _, line := range strings.Split(data, "\n") {
+		if line == "" {
+			continue
+		}
+		name, path, ok := strings.Cut(line, " ")
+		if !ok {
+			cliMsg(true, corruptedStoreErrorMsg)
+		}
+		store = append(store, Anchor{name: name, path: path})
+	}
+	return &store
+}
+
+func (store *Store) save() {
+	var b bytes.Buffer
+	for _, anchor := range *store {
+		b.WriteString(anchor.name)
+		b.WriteByte(' ')
+		b.WriteString(anchor.path)
+		b.WriteByte('\n')
+	}
+
+	err := os.WriteFile(storePath, b.Bytes(), 0644)
 	if err != nil {
-		cliMsg(true, corruptedStoreErrorMsg)
-		os.Exit(1)
+		cliMsg(true, "could not save anchors: %v", err)
+	}
+}
+
+func getAnchorName(cmdArgs []string) string {
+	numArgs := len(cmdArgs)
+	name := ""
+	switch numArgs {
+	case 0:
+		cliMsg(true, "anchor name expected")
+	case 1:
+		name = cmdArgs[0]
+	default:
+		cliMsg(true, "unexpected extra arguments: %s", strings.Join(cmdArgs[1:], " "))
 	}
 
-	return store
+	return name
 }
 
 func (store *Store) addAnchor(name string) {
-	if len(store.Anchors) == LIMIT {
-		cliMsg(true, "anchor limit reached (%d)\n  -> remove one with \"j -r <name>\"\n  -> or reset all with \"j -R\"", LIMIT)
-		os.Exit(1)
+	anchors := *store
+	if len(anchors) >= LIMIT {
+		cliMsg(true, "anchor limit reached (%d)", LIMIT)
 	}
 	absPath, err := filepath.Abs(".")
 	if err != nil {
 		cliMsg(true, "could not resolve current directory")
-		os.Exit(1)
 	} else if name[0] == '-' {
 		cliMsg(true, "anchor name cannot start with a dash")
-		os.Exit(1)
+	} else if len(name) > 6 {
+		cliMsg(false,
+			"%s prefer short anchor names for faster jumping",
+			style("warn:", ansiYellow),
+		)
 	}
-	for _, anchor := range store.Anchors {
-		if anchor.Name == name {
-			cliMsg(true, "anchor with name %q (%q) already exists", name, absPath)
-			os.Exit(1)
-		}
-		if anchor.Path == absPath {
-			cliMsg(true, "anchor with path %q (%q) already exists", absPath, anchor.Name)
-			os.Exit(1)
+	for _, anchor := range anchors {
+		if anchor.name == name {
+			cliMsg(true, "anchor %q already exists", name)
+		} else if anchor.path == absPath {
+			cliMsg(true, "directory %q is already anchored as %q", absPath, anchor.name)
 		}
 	}
 
-	store.Anchors = append(store.Anchors, Anchor{Name: name, Path: absPath})
-	cliMsg(false, "added anchor %q (%q)", name, absPath)
+	*store = append(anchors, Anchor{name: name, path: absPath})
+	cliMsg(false,
+		"added anchor: %s%s%s",
+		style(name, ansiBold, ansiYellow),
+		style("-✓->", ansiGreen),
+		style(absPath),
+	)
 }
 
 func (store *Store) removeAnchor(name string) {
-	for i, anchor := range store.Anchors {
-		if anchor.Name == name {
-			store.Anchors = append(store.Anchors[:i], store.Anchors[i+1:]...)
-			cliMsg(false, "removed anchor %q (%q)", name, anchor.Path)
+	anchors := *store
+	for i, anchor := range anchors {
+		if anchor.name == name {
+			*store = append(anchors[:i], anchors[i+1:]...)
+			cliMsg(false,
+				"removed anchor: %s%s%s",
+				style(name, ansiBold, ansiYellow),
+				style("-×->", ansiRed),
+				style(anchor.path),
+			)
 			return
 		}
 	}
 	cliMsg(true, "anchor %q does not exist", name)
-	os.Exit(1)
 }
 
 func (store *Store) list() {
+	anchors := *store
 	topNameLen := 0
-	for _, anchor := range store.Anchors {
-		if len(anchor.Name) > topNameLen {
-			topNameLen = len(anchor.Name)
+	for _, anchor := range anchors {
+		if len(anchor.name) > topNameLen {
+			topNameLen = len(anchor.name)
 		}
 	}
-	for _, anchor := range store.Anchors {
-		padAmt := topNameLen - len(anchor.Name) + 2
+	for _, anchor := range anchors {
+		padAmt := topNameLen - len(anchor.name) + 2
 		pad := style(fmt.Sprintf("%s➜", strings.Repeat("–", padAmt-1)), ansiGray)
-		fmt.Fprintf(os.Stderr, "%s%s%s\n", style(anchor.Name, ansiBold, ansiYellow), pad, anchor.Path)
-	}
-}
-
-func (store *Store) save() {
-	store.Version = version
-	data, err := json.MarshalIndent(store, "", "\t")
-	if err != nil {
-		cliMsg(true, corruptedStoreErrorMsg)
-		os.Exit(1)
-	}
-	err = os.WriteFile(storePath, data, 0644)
-	if err != nil {
-		cliMsg(true, "could not save store: %v", err)
-		os.Exit(1)
+		fmt.Fprintf(os.Stderr, "%s%s%s\n", style(anchor.name, ansiBold, ansiYellow), pad, anchor.path)
 	}
 }
 
@@ -187,65 +155,47 @@ func main() {
 
 	cmd := args[0]
 	cmdArgs := args[1:]
-	numCmdArgs := len(cmdArgs)
 	switch cmd {
 	case "-h":
 		printUsage()
 	case "-a":
+		name := getAnchorName(cmdArgs)
 		store := getStore()
-		name := ""
-		switch numCmdArgs {
-		case 1:
-			name = cmdArgs[0]
-		case 0:
-			cliMsg(true, "provide an anchor name")
-			os.Exit(1)
-		default:
-			cliMsg(true, "unexpected extra arguments: %s", strings.Join(cmdArgs[1:], " "))
-			os.Exit(1)
-		}
-
 		store.addAnchor(name)
 		store.save()
 	case "-r":
+		name := getAnchorName(cmdArgs)
 		store := getStore()
-		if numCmdArgs != 1 {
-			cliMsg(true, "provide an anchor name")
-			os.Exit(1)
-		}
-		name := cmdArgs[0]
 		store.removeAnchor(name)
 		store.save()
 	case "-l":
-		store := getStore()
-		store.list()
+		getStore().list()
 	case "-R":
-		if confirm("Reset anchor store (this will delete all anchors)?") {
-			store := Store{Anchors: []Anchor{}}
-			store.save()
-			cliMsg(false, "reset anchor store")
+		if confirm("Reset all anchors?") {
+			(&Store{}).save()
+			cliMsg(false, "reset anchors")
 		}
 	default:
-		// args is at least 1 long, checked above
 		if cmd[0] == '-' {
 			cliMsg(true, "invalid command: %q", cmd)
-			os.Exit(1)
 		}
 
 		if numArgs > 1 {
 			cliMsg(true, "unexpected extra arguments: %s", strings.Join(cmdArgs, " "))
-			os.Exit(1)
 		}
-		store := getStore()
+		anchors := *getStore()
 		name := args[0]
-		for _, anchor := range store.Anchors {
-			if anchor.Name == name {
-				fmt.Print(anchor.Path)
+		for _, anchor := range anchors {
+			if anchor.name == name {
+				info, err := os.Stat(anchor.path)
+				if err != nil || !info.IsDir() {
+					cliMsg(true, "could not access directory %q", anchor.path)
+				}
+				fmt.Print(anchor.path)
 				os.Exit(0)
 			}
 		}
 		cliMsg(true, "anchor %q does not exist", name)
-		os.Exit(1)
 	}
 
 	os.Exit(0)
