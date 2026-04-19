@@ -12,8 +12,7 @@ import (
 const version = "0.0.16"
 const LIMIT = 32
 
-var binPath = os.Getenv("EXE_ROOT")
-var storePath = binPath + "/store"
+var storePath = os.Getenv("EXE_ROOT") + "/store"
 
 type Store []Anchor
 type Anchor struct {

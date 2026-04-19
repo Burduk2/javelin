@@ -4,9 +4,8 @@ function j {
         [string[]]$Args
     )
 
-    $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-    $exeRoot = (Resolve-Path (Join-Path $scriptDir "..\bin")).Path
-    $dir = & "$exeRoot\javelin.exe" @Args
+    $env:EXE_ROOT = "__EXE_ROOT__"
+    $dir = & "__BIN_PATH__" @Args
     if ($LASTEXITCODE -ne 0) {
         return
     }
